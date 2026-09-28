@@ -16,6 +16,8 @@ from app.timeline import (
     integrate_within,
     merge_intervals,
     reconcile_illuminance,
+    simplify_intervals,
+    timelines_equal,
     year_bounds,
 )
 
@@ -199,6 +201,169 @@ def test_attribute_exposure_zero_lux_and_empty_window():
     total, attrs = attribute_exposure([], _dt(8), _dt(18))
     assert total == 0.0
     assert attrs == []
+
+
+# ------------------------------------------------------------- 照明计划精简
+
+def test_simplify_tied_equal_lux_inner_interval_removable():
+    # A: 08-18 @50；B: 10-12 @50（等照度并列，被 A 完全覆盖）→ B 可撤、A 保留
+    result = simplify_intervals(
+        [(1, _dt(8), _dt(18), 50), (2, _dt(10), _dt(12), 50)]
+    )
+    assert result.removable_ids == (2,)
+    assert result.retained_ids == (1,)
+    # 原计划与精简计划的恒照度片段逐时刻一致（08-18 一段 50）
+    assert result.original_segments == (Segment(_dt(8), _dt(18), 50),)
+    assert result.simplified_segments == result.original_segments
+    assert result.range_start == _dt(8)
+    assert result.range_end == _dt(18)
+
+
+def test_simplify_brighter_interval_must_be_retained():
+    # A: 08-18 @50；B: 12-13 @300 → 两条都保留；撤任一条都会改变某时刻照度
+    result = simplify_intervals(
+        [
+            (1, _dt(8), _dt(18), 50),
+            (2, _dt(12), _dt(13), 300),
+        ]
+    )
+    assert result.removable_ids == ()
+    assert result.retained_ids == (1, 2)
+    assert result.simplified_segments == result.original_segments
+
+
+def test_simplify_dimmer_interval_dominated_by_brighter():
+    # 两条范围相同：撤去较暗的 50 不影响逐时刻照度（取 max 恒为 80）
+    result = simplify_intervals(
+        [
+            (1, _dt(8), _dt(10), 50),
+            (2, _dt(8), _dt(10), 80),
+        ]
+    )
+    assert result.removable_ids == (1,)
+    assert result.retained_ids == (2,)
+    assert result.simplified_segments == (Segment(_dt(8), _dt(10), 80),)
+
+
+def test_simplify_id_descending_greedy_keeps_smallest_id_for_duplicates():
+    # 完全相同的两条：ID 大者先试撤 → 2 可撤；再试 1 时集合里只剩它 → 保留
+    result = simplify_intervals(
+        [
+            (1, _dt(8), _dt(10), 50),
+            (2, _dt(8), _dt(10), 50),
+        ]
+    )
+    assert result.removable_ids == (2,)
+    assert result.retained_ids == (1,)
+
+
+def test_simplify_chain_redundancy_decided_on_updated_set():
+    # 三条等照度首尾相接（合并后 08-14 一段 50）：14 撤后 13 成为必需（盖住 12-14）。
+    # ID 从大到小：撤 3 → 剩 1(08-12)+2(10-14) 仍为 08-14 @50 ✓；
+    # 再撤 2 → 只剩 08-12，12-14 变暗 ✗ 保留 2；再撤 1 → 10-14 不含 08-10 ✗ 保留 1。
+    result = simplify_intervals(
+        [
+            (1, _dt(8), _dt(12), 50),
+            (2, _dt(10), _dt(14), 50),
+            (3, _dt(12), _dt(14), 50),
+        ]
+    )
+    assert result.removable_ids == (3,)
+    assert result.retained_ids == (1, 2)
+
+
+def test_simplify_zero_lux_intervals_always_removable():
+    # 单独的 0 lux 区间：时间线恒为 0（无正照度片段），可撤；范围仍按其起止给出
+    result = simplify_intervals([(1, _dt(8), _dt(10), 0)])
+    assert result.removable_ids == (1,)
+    assert result.retained_ids == ()
+    assert result.original_segments == ()
+    assert result.simplified_segments == ()
+    assert result.range_start == _dt(8)
+    assert result.range_end == _dt(10)
+
+    # 与有灯区间重叠的 0 lux 同样可撤
+    result = simplify_intervals(
+        [
+            (1, _dt(8), _dt(12), 50),
+            (2, _dt(10), _dt(11), 0),
+        ]
+    )
+    assert result.removable_ids == (2,)
+    assert result.retained_ids == (1,)
+    assert result.simplified_segments == (Segment(_dt(8), _dt(12), 50),)
+
+
+def test_simplify_cross_day_and_cross_year_ranges():
+    # 跨日：背景长区间覆盖短区间（等照度）→ 短区间可撤
+    result = simplify_intervals(
+        [
+            (1, _dt(20), _dt(10, day=2), 80),
+            (2, _dt(22), _dt(8, day=2), 80),
+        ]
+    )
+    assert result.removable_ids == (2,)
+    assert result.retained_ids == (1,)
+    assert result.range_start == _dt(20)
+    assert result.range_end == _dt(10, day=2)
+
+    # 跨年：2026-12-31 → 2027-01-01 的两条等照度，短的可撤
+    ny_eve = datetime(2026, 12, 31, 20, tzinfo=timezone.utc)
+    ny_morn = datetime(2027, 1, 1, 4, tzinfo=timezone.utc)
+    result = simplify_intervals(
+        [
+            (1, ny_eve, ny_morn, 100),
+            (2, datetime(2026, 12, 31, 22, tzinfo=timezone.utc),
+             datetime(2027, 1, 1, 2, tzinfo=timezone.utc), 100),
+        ]
+    )
+    assert result.removable_ids == (2,)
+    assert result.retained_ids == (1,)
+    assert result.range_start == ny_eve
+    assert result.range_end == ny_morn
+
+
+def test_simplify_empty_intervals():
+    result = simplify_intervals([])
+    assert result.removable_ids == ()
+    assert result.retained_ids == ()
+    assert result.original_segments == ()
+    assert result.simplified_segments == ()
+    assert result.range_start is None
+    assert result.range_end is None
+
+
+def test_simplify_partial_overlap_requires_both():
+    # A: 08-12 @50、B: 10-14 @50（部分重叠）：撤任一条都会让某段变暗
+    result = simplify_intervals(
+        [(1, _dt(8), _dt(12), 50), (2, _dt(10), _dt(14), 50)]
+    )
+    assert result.removable_ids == ()
+    assert result.retained_ids == (1, 2)
+
+
+def test_simplify_adjacent_different_lux_both_retained():
+    # 首尾相接但照度不同：两条都必需
+    result = simplify_intervals(
+        [(1, _dt(8), _dt(10), 50), (2, _dt(10), _dt(12), 80)]
+    )
+    assert result.removable_ids == ()
+    assert result.retained_ids == (1, 2)
+
+
+def test_timelines_equal_is_pointwise_not_integral():
+    # 两条时间线曝光积分相同（均 200 lux·h）但照度分布不同 → 不相等
+    left = [Segment(_dt(8), _dt(12), 50)]
+    right = [Segment(_dt(8), _dt(10), 100)]
+    assert integrate(left) == integrate(right) == 200
+    assert timelines_equal(left, right, _dt(8), _dt(12)) is False
+
+    # 同一时间线逐片段一致 → 相等；范围外的差异不影响窗口内判定
+    same = [Segment(_dt(8), _dt(12), 50)]
+    assert timelines_equal(left, same, _dt(8), _dt(12)) is True
+    assert timelines_equal(
+        [Segment(_dt(8), _dt(10), 50)], same, _dt(8), _dt(10)
+    ) is True
 
 
 # ------------------------------------------------------------- 现场照度对账

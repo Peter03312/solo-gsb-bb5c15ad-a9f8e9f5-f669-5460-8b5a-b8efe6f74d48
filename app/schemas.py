@@ -223,6 +223,34 @@ class LightingPreviewOut(BaseModel):
     exhibits: list[LightingPreviewExhibitOut]
 
 
+class LightingSimplificationOut(BaseModel):
+    """照明计划精简建议：撤去可撤区间后每一时刻有效照度仍与原计划一致（只读）。"""
+
+    showcase_id: int
+    showcase_name: str
+    range_start: Optional[datetime] = Field(
+        default=None,
+        description="所有区间覆盖时间范围的起点（最早开灯时刻，UTC）；无区间时为 null",
+    )
+    range_end: Optional[datetime] = Field(
+        default=None,
+        description="所有区间覆盖时间范围的终点（最晚关灯时刻，UTC）；无区间时为 null",
+    )
+    removable_interval_ids: list[int] = Field(
+        default_factory=list, description="可撤去的照明区间 ID（升序）"
+    )
+    retained_interval_ids: list[int] = Field(
+        default_factory=list, description="须保留的照明区间 ID（升序）"
+    )
+    original_segments: list[MergedSegmentOut] = Field(
+        default_factory=list, description="原计划合并后的恒照度片段（重叠取最大照度）"
+    )
+    simplified_segments: list[MergedSegmentOut] = Field(
+        default_factory=list,
+        description="精简计划（撤去全部可撤区间后）的恒照度片段；与原计划逐时刻同照度",
+    )
+
+
 class OpenHoursCoverageIn(BaseModel):
     """开放时段照明覆盖巡检请求。
 

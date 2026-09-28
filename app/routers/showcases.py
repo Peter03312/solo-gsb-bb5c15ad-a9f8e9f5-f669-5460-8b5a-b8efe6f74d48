@@ -10,8 +10,10 @@ from ..budget import (
     build_exhibit_preview,
     build_illuminance_reconciliation,
     build_interval_attribution,
+    build_lighting_simplification,
     build_open_hours_coverage,
     build_safe_lux_limit,
+    load_all_case_intervals,
     load_case_intervals,
     load_intervals_in_range,
     resolve_limit,
@@ -29,6 +31,7 @@ from ..schemas import (
     LightIntervalOut,
     LightingPreviewIn,
     LightingPreviewOut,
+    LightingSimplificationOut,
     OpenHoursCoverageIn,
     OpenHoursCoverageOut,
     SafeLuxLimitIn,
@@ -263,6 +266,20 @@ def lighting_preview(showcase_id: int, body: LightingPreviewIn, conn=Depends(get
             for e in exhibits
         ],
     }
+
+
+# ------------------------------------------------------------- 照明计划精简
+
+@router.post(
+    "/showcases/{showcase_id}/lighting-simplification",
+    response_model=LightingSimplificationOut,
+    summary="照明计划精简：找出撤去后逐时刻有效照度不变的区间（只读，不落库）",
+)
+def lighting_simplification(showcase_id: int, conn=Depends(get_db)):
+    showcase = _get_showcase(conn, showcase_id)
+    # 针对展柜全部照明区间（不限年份）；全程只读，不改动任何照明记录
+    intervals = load_all_case_intervals(conn, showcase_id)
+    return build_lighting_simplification(showcase, intervals)
 
 
 # ------------------------------------------------------------- 安全照度上限

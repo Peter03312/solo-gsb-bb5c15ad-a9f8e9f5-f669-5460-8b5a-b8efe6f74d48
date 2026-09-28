@@ -16,6 +16,8 @@ from .schemas import (
     IntervalAttributionItemOut,
     IntervalAttributionOut,
     LightingPreviewExhibitOut,
+    LightingSimplificationOut,
+    MergedSegmentOut,
     OpenHoursCoverageDayOut,
     OpenHoursCoverageIn,
     OpenHoursCoverageOut,
@@ -37,6 +39,7 @@ from .timeline import (
     merge_intervals,
     parse_utc,
     reconcile_illuminance,
+    simplify_intervals,
     year_bounds,
 )
 
@@ -90,6 +93,28 @@ def load_case_segments(
         for _, start, end, lux in load_case_intervals(conn, showcase_id, year)
     ]
     return merge_intervals(intervals)
+
+
+def load_all_case_intervals(
+    conn: sqlite3.Connection, showcase_id: int
+) -> list[tuple[int, datetime, datetime, float]]:
+    """取出展柜的全部照明区间（不限年份），返回 (id, start, end, lux)。
+
+    精简建议针对展柜的**全部**照明区间；跨日跨年区间原样返回，时间范围与
+    裁剪均由精简算法处理。
+    """
+    rows = conn.execute(
+        """
+        SELECT id, start_ts, end_ts, lux FROM light_intervals
+        WHERE showcase_id = ?
+        ORDER BY id
+        """,
+        (showcase_id,),
+    ).fetchall()
+    return [
+        (r["id"], parse_utc(r["start_ts"]), parse_utc(r["end_ts"]), float(r["lux"]))
+        for r in rows
+    ]
 
 
 def load_intervals_in_range(
@@ -206,6 +231,37 @@ def build_exhibit_preview(
         delta_lux_hours=_r(preview_total - current_total),
         current_first_exceed_at=current_exceed_at,
         preview_first_exceed_at=preview_exceed_at,
+    )
+
+
+def build_lighting_simplification(
+    showcase: sqlite3.Row,
+    intervals: list[tuple[int, datetime, datetime, float]],
+) -> LightingSimplificationOut:
+    """对展柜全部照明区间给出精简建议（只读，不落库）。
+
+    按区间 ID 从大到小逐条试撤：仅当在所有区间覆盖的时间范围内每一时刻
+    有效照度（重叠取最大照度）都与原计划相同时才列为可撤，并以更新后的
+    集合判断下一条；比较基于逐时刻恒照度而非曝光积分。返回可撤去 / 须
+    保留的区间 ID（各自升序）与原计划、精简计划的恒照度片段。
+    """
+    result = simplify_intervals(intervals)
+
+    def _segments_out(segments) -> list[MergedSegmentOut]:
+        return [
+            MergedSegmentOut(start=seg.start, end=seg.end, lux=_r(seg.lux))
+            for seg in segments
+        ]
+
+    return LightingSimplificationOut(
+        showcase_id=showcase["id"],
+        showcase_name=showcase["name"],
+        range_start=result.range_start,
+        range_end=result.range_end,
+        removable_interval_ids=list(result.removable_ids),
+        retained_interval_ids=list(result.retained_ids),
+        original_segments=_segments_out(result.original_segments),
+        simplified_segments=_segments_out(result.simplified_segments),
     )
 
 

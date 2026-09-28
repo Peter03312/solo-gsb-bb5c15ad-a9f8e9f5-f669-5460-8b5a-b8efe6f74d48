@@ -262,6 +262,101 @@ def day_bounds(day: datetime) -> tuple[datetime, datetime]:
 
 
 @dataclass(frozen=True)
+class IntervalSimplification:
+    """照明计划精简结果：可撤去 / 须保留的区间 ID 与两条恒照度时间线。"""
+
+    removable_ids: tuple[int, ...]
+    retained_ids: tuple[int, ...]
+    original_segments: tuple[Segment, ...]
+    simplified_segments: tuple[Segment, ...]
+    range_start: datetime | None
+    range_end: datetime | None
+
+
+def timelines_equal(
+    left: list[Segment], right: list[Segment], range_start: datetime, range_end: datetime
+) -> bool:
+    """两条时间线在 [range_start, range_end) 内是否**逐时刻**照度相同。
+
+    不是比较曝光积分：照度必须在每个时刻都一致。做法是以两侧片段的所有边界
+    为变化点统一切片，逐片比较照度（沿用 EPSILON 容差抑制浮点噪声）。片段
+    边界之外（无灯）照度按 0 计。
+    """
+    range_start, range_end = parse_utc(range_start), parse_utc(range_end)
+    if range_end <= range_start:
+        return True
+    left = clip_segments(left, range_start, range_end)
+    right = clip_segments(right, range_start, range_end)
+
+    points = {range_start, range_end}
+    for seg in left + right:
+        points.add(seg.start)
+        points.add(seg.end)
+    ordered = sorted(points)
+    li = ri = 0
+    for seg_start, seg_end in zip(ordered, ordered[1:]):
+        while li < len(left) and left[li].end <= seg_start:
+            li += 1
+        while ri < len(right) and right[ri].end <= seg_start:
+            ri += 1
+        lux_left = left[li].lux if li < len(left) and left[li].start <= seg_start else 0.0
+        lux_right = right[ri].lux if ri < len(right) and right[ri].start <= seg_start else 0.0
+        if abs(lux_left - lux_right) > EPSILON:
+            return False
+    return True
+
+
+def simplify_intervals(
+    intervals: list[tuple[int, datetime, datetime, float]],
+) -> IntervalSimplification:
+    """给出不改变任何时刻有效照度的最大贪心精简方案（只读演算）。
+
+    按区间 ID **从大到小**依次尝试撤去：仅当撤去后，在所有区间覆盖的时间范围
+    （最早开灯 ~ 最晚关灯）内每一时刻的有效照度（重叠取最大照度）都与原计划
+    相同，才把该区间列为可撤去；是否可撤始终以**撤去此前各条后更新的集合**
+    判断。比较逐时刻恒照度片段进行，不依赖曝光积分，因此等照度并列、0 lux
+    区间（恒为可撤）与跨日跨年区间都能正确处理。
+
+    返回可撤去 / 须保留的区间 ID（调用方按升序输出）与原计划、精简后两条
+    恒照度片段；无区间时范围为 None、片段为空。
+    """
+    parsed = [
+        (interval_id, parse_utc(start), parse_utc(end), float(lux))
+        for interval_id, start, end, lux in intervals
+    ]
+    if not parsed:
+        return IntervalSimplification((), (), (), (), None, None)
+
+    range_start = min(start for _, start, _, _ in parsed)
+    range_end = max(end for _, _, end, _ in parsed)
+
+    def _segments(ids: set[int]) -> list[Segment]:
+        return merge_intervals(
+            [(start, end, lux) for iid, start, end, lux in parsed if iid in ids]
+        )
+
+    baseline = _segments({iid for iid, *_ in parsed})
+    current_ids = {iid for iid, *_ in parsed}
+    removable: list[int] = []
+    for interval_id in sorted(current_ids, reverse=True):
+        trial_ids = current_ids - {interval_id}
+        if timelines_equal(_segments(trial_ids), baseline, range_start, range_end):
+            removable.append(interval_id)
+            current_ids = trial_ids
+
+    retained_ids = current_ids
+    simplified = _segments(current_ids)
+    return IntervalSimplification(
+        removable_ids=tuple(sorted(removable)),
+        retained_ids=tuple(sorted(retained_ids)),
+        original_segments=tuple(baseline),
+        simplified_segments=tuple(simplified),
+        range_start=range_start,
+        range_end=range_end,
+    )
+
+
+@dataclass(frozen=True)
 class DeviationAnomaly:
     """超出允许偏差的连续异常时段（同方向相邻片段已合并）。"""
 
